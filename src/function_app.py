@@ -39,6 +39,13 @@ def routeIQ_file_upload(myblob: func.InputStream,todo: func.Out[func.SqlRow]):
 
     logging.info(f"Total delivered tracking IDs fetched: {len(delivered_trackingIds)}")
 
+    
+    logging.info("Trying to fetch all errored tracking IDs from database.....")
+
+    errored_trackingIds = get_all_error_trackingIds()
+
+    logging.info(f"Total errored tracking IDs fetched: {len(errored_trackingIds)}")
+
     try:
         df['TRACKINGID'] = df['TRACKINGID'].astype(int)
         delivered_trackingIds_int = [int(x) for x in delivered_trackingIds]
@@ -49,8 +56,22 @@ def routeIQ_file_upload(myblob: func.InputStream,todo: func.Out[func.SqlRow]):
     df = df[~df['TRACKINGID'].isin(delivered_trackingIds_int)]
 
 
+
+    try:
+        df['TRACKINGID'] = df['TRACKINGID'].astype(int)
+        errored_trackingIds_int = [int(x) for x in errored_trackingIds]
+    except Exception as e:
+        logging.error(f"Error converting TRACKINGID to int: {e}")
+        errored_trackingIds_int = errored_trackingIds
+
+    df = df[~df['TRACKINGID'].isin(errored_trackingIds_int)]
+
+
+
     logging.info(f"Total rows to process after filtering: {len(df)}")
 
+
+    df = df.drop_duplicates(subset=['TRACKINGID'])
 
     arr_resp=chunk_rows_and_call_api(df, chunk_size)
 
@@ -68,7 +89,7 @@ def get_all_delivered_trackingIds():
 
     '''
 
-    Returns a dataframe of all tracking ids which are delivered.
+    Returns a list of all tracking ids which are delivered.
 
     '''
 
@@ -100,6 +121,46 @@ def get_all_delivered_trackingIds():
             delivered_trackingIds.append(row[0])
     print(f"Total delivered tracking IDs fetched: {delivered_trackingIds}")
     return delivered_trackingIds
+
+def get_all_error_trackingIds():
+
+    '''
+
+    Returns a list of all tracking ids which are errored
+
+    '''
+
+    errored_trackingIds=[]
+
+    with get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+                WITH cte AS (
+                SELECT
+                    t.TransactionId,
+                    track.value AS trackingNumber,
+                    JSON_VALUE(track.track_results, '$.latestStatusDetail.description') AS description,
+                    JSON_VALUE(track.track_results, '$.latestStatusDetail.code') AS latest_status_code,
+                    JSON_VALUE(track.track_results, '$.originLocation.locationContactAndAddress.address.city') AS originCity,
+                    JSON_VALUE(track.track_results, '$.destinationLocation.locationContactAndAddress.address.city') AS destinationCity,
+                    JSON_QUERY(track.track_results, '$.dateAndTimes') AS dateTimeInfo,
+                    JSON_QUERY(track.track_results, '$.estimatedDeliveryTimeWindow.window') AS etaWindow,
+                    JSON_VALUE(track.track_results, '$.error.code') AS error_code
+                FROM routeiq.FedexTrackingRaw t
+                CROSS APPLY OPENJSON(t.RawJson, '$.output.completeTrackResults')
+                    WITH (
+                        value NVARCHAR(50) '$.trackingNumber',
+                        track_results NVARCHAR(MAX) '$.trackResults[0]' AS JSON
+                    ) track
+            )
+            SELECT distinct trackingNumber
+            FROM cte
+            where error_code is not null
+        """)
+        for row in cursor.fetchall():
+            errored_trackingIds.append(row[0])
+    print(f"Total errored tracking IDs fetched: {errored_trackingIds}")
+    return errored_trackingIds
         
     
 
@@ -203,4 +264,24 @@ def chunk_rows_and_call_api(df, chunk_size):
 
         c=c+chunk_size
 
+    outer_array=append_identifier_to_response(outer_array, df)
+    
+    return outer_array
+
+def append_identifier_to_response(outer_array, df):
+
+    id_map = {
+        str(row['TRACKINGID']): {
+            'identifierKey': row['identifier_key'],
+            'identifierValue': row['identifier_value']
+        }
+        for _, row in df.iterrows()
+    }
+
+    for resp in outer_array:
+        for result in resp.get('output', {}).get('completeTrackResults', []):
+            tracking_id = str(result.get('trackingNumber'))
+            if tracking_id in id_map:
+                result['identifierKey'] = id_map[tracking_id]['identifierKey']
+                result['identifierValue'] = id_map[tracking_id]['identifierValue']
     return outer_array
