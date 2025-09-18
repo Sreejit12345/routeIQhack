@@ -33,7 +33,11 @@ def routeIQ_file_upload(myblob: func.InputStream,todo: func.Out[func.SqlRow]):
 
     df = pd.read_csv(myblob)
 
+    logging.info("Trying to fetch all delivered tracking IDs from database.....")
+
     delivered_trackingIds = get_all_delivered_trackingIds()
+
+    logging.info(f"Total delivered tracking IDs fetched: {len(delivered_trackingIds)}")
 
     try:
         df['TRACKINGID'] = df['TRACKINGID'].astype(int)
@@ -44,7 +48,9 @@ def routeIQ_file_upload(myblob: func.InputStream,todo: func.Out[func.SqlRow]):
 
     df = df[~df['TRACKINGID'].isin(delivered_trackingIds_int)]
 
+
     logging.info(f"Total rows to process after filtering: {len(df)}")
+
 
     arr_resp=chunk_rows_and_call_api(df, chunk_size)
 
@@ -117,6 +123,7 @@ def get_secret_from_key_vault(vault_url, secret_name):
     credential = DefaultAzureCredential()
     client = SecretClient(vault_url=vault_url, credential=credential)
     secret = client.get_secret(secret_name)
+    logging.info("Secret {} token obtained successfully.".format(secret_name))
     return secret.value
 
 def get_bearer_token(client_id, client_secret):
@@ -135,6 +142,9 @@ def get_bearer_token(client_id, client_secret):
     response = requests.post(url, headers=headers, data=data)
     response.raise_for_status()
     token_info = response.json()
+
+    logging.info("Bearer token obtained successfully.")
+
     return token_info["access_token"]
 
 def make_fedex_api_call(bearer_token, endpoint, payload):
