@@ -1,88 +1,53 @@
-import azure.functions as func
-import datetime
-import json
+from fedex_creator import FEDEXAPICreator
+from dhl_creator import DHLAPICreator
 import logging
-from azure.identity import DefaultAzureCredential
-from azure.keyvault.secrets import SecretClient
-from dotenv import load_dotenv
-import os
-import requests
+import azure.functions as func
 import pandas as pd
+import os
+import uuid
 import pyodbc
 import struct
+from datetime import datetime
+from dotenv import load_dotenv
+from azure.identity import DefaultAzureCredential
+from deltalake import DeltaTable, write_deltalake
 
 load_dotenv()
 app = func.FunctionApp()
 vault_url = os.getenv("key_vault_uri")
-chunk_size = int(os.getenv("chunk_size", "30"))
 connection_str = os.getenv("ODBCConnectionString")
-
-logging.info('Chunk size set to: %d', chunk_size)
+spares_storage_account_url = os.getenv("spares_storage_account_url")
+spares_storage_account_name = os.getenv("spares_storage_acc_name")
 
 
 @app.blob_trigger(arg_name="myblob", path="ipfiles/in.csv",
-                               connection="AzureWebJobsStorage")
-@app.sql_output(arg_name="todo",
-                        command_text="[routeiq].[FedexTrackingRaw]",
-                        connection_string_setting="SqlConnectionString")
- 
-def routeIQ_file_upload(myblob: func.InputStream,todo: func.Out[func.SqlRow]):
+                               connection="AzureWebJobsStorage") 
+def routeIQ_file_upload(myblob: func.InputStream):
     logging.info(f"Python blob trigger function processed blob"
                 f"Name: {myblob.name}"
                 f"Blob Size: {myblob.length} bytes")
 
-    df = pd.read_csv(myblob)
+    df = pd.read_csv(myblob,keep_default_na=False)
+    df = df.drop_duplicates(subset=['TRACKINGID','carrier_type'])
 
-    logging.info("Trying to fetch all delivered tracking IDs from database.....")
-
-    delivered_trackingIds = get_all_delivered_trackingIds()
-
-    logging.info(f"Total delivered tracking IDs fetched: {len(delivered_trackingIds)}")
-
+    # convert to strategy pattern later
     
-    logging.info("Trying to fetch all errored tracking IDs from database.....")
+    df_fedex = df[df['carrier_type'].str.lower() == 'fedex']
+    df_dhl = df[df['carrier_type'].str.lower() == 'dhl']
 
-    errored_trackingIds = get_all_error_trackingIds()
+    fedex_obj=FEDEXAPICreator().factory_method()
+    dhl_obj=DHLAPICreator().factory_method()
 
-    logging.info(f"Total errored tracking IDs fetched: {len(errored_trackingIds)}")
+    result_fedex=fedex_obj.curate_api_response(df_fedex)
+    result_dhl=dhl_obj.curate_api_response(df_dhl)
 
-    try:
-        df['TRACKINGID'] = df['TRACKINGID'].astype(int)
-        delivered_trackingIds_int = [int(x) for x in delivered_trackingIds]
-    except Exception as e:
-        logging.error(f"Error converting TRACKINGID to int: {e}")
-        delivered_trackingIds_int = delivered_trackingIds
-
-    df = df[~df['TRACKINGID'].isin(delivered_trackingIds_int)]
-
-
-
-    try:
-        df['TRACKINGID'] = df['TRACKINGID'].astype(int)
-        errored_trackingIds_int = [int(x) for x in errored_trackingIds]
-    except Exception as e:
-        logging.error(f"Error converting TRACKINGID to int: {e}")
-        errored_trackingIds_int = errored_trackingIds
-
-    df = df[~df['TRACKINGID'].isin(errored_trackingIds_int)]
-
-
-
-    logging.info(f"Total rows to process after filtering: {len(df)}")
-
-
-    df = df.drop_duplicates(subset=['TRACKINGID'])
-
-    arr_resp=chunk_rows_and_call_api(df, chunk_size)
-
-    rows = []
-    for resp in arr_resp:
-        row = func.SqlRow.from_dict({"RawJson": json.dumps(resp), 'TransactionId': resp.get('transactionId', None)})
-        rows.append(row)
-        
-    todo.set(rows)
+    combined_df_fedex=fedex_obj.generate_final_output(result_fedex)
+    combined_df_dhl=dhl_obj.generate_final_output(result_dhl)
+   
+    write_to_deltalake(combined_df_fedex)
+    write_to_deltalake(combined_df_dhl)
     
-    logging.info("Processing completed successfully.")
+    logging.info("Processing/file write completed successfully.")
 
 
 def get_all_delivered_trackingIds():
@@ -180,108 +145,49 @@ def get_conn():
     return conn
 
 
-def get_secret_from_key_vault(vault_url, secret_name):
+def write_to_deltalake(df):
+    '''
+
+    Writes the dataframe to delta lake.
+
+    '''
+
+    logging.info("Writing to delta lake...")
+
     credential = DefaultAzureCredential()
-    client = SecretClient(vault_url=vault_url, credential=credential)
-    secret = client.get_secret(secret_name)
-    logging.info("Secret {} token obtained successfully.".format(secret_name))
-    return secret.value
+    DEFAULT_AZURE_STORAGE_SCOPE = "https://storage.azure.com/.default"
+    azure_storage_token = credential.get_token(DEFAULT_AZURE_STORAGE_SCOPE)
 
-def get_bearer_token(client_id, client_secret):
-
-
-    url = "https://apis.fedex.com/oauth/token"
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-    data = {
-        "grant_type": "client_credentials",
-        "client_id": client_id,
-        "client_secret": client_secret
-    }
-
-    response = requests.post(url, headers=headers, data=data)
-    response.raise_for_status()
-    token_info = response.json()
-
-    logging.info("Bearer token obtained successfully.")
-
-    return token_info["access_token"]
-
-def make_fedex_api_call(bearer_token, endpoint, payload):
-    url = f"https://apis.fedex.com{endpoint}"
-    headers = {
-        "Authorization": f"Bearer {bearer_token}",
-        "Content-Type": "application/json"
-    }
-    response = requests.post(url, headers=headers, json=payload)
-    response.raise_for_status()
-    return response.json()
-
-def chunk_rows_and_call_api(df, chunk_size):
-
-    '''
-
-    Chunks rows into chunks of specified size and creates payload and calls FedEx API for each chunk.
-
-    '''
-
-    row_count = df['TRACKINGID'].count()
+    try:
+        if datetime.fromtimestamp(azure_storage_token.expires_on) <= datetime.now():
+            azure_storage_token = credential.get_token(DEFAULT_AZURE_STORAGE_SCOPE)
+    except Exception as e:
+        logging.error(f"Access token retrieval failed: {e}")
     
-    outer_array=[]
-
-    c=0
-
-    bearer_token= get_bearer_token(get_secret_from_key_vault(vault_url, "fedexclientid"),get_secret_from_key_vault(vault_url, "fedexclientsecret"))
-
-    while(c<=row_count):
-
-        inner_array=[]
-
-        chunk_count=0
-
-        payload={}
-
-        for index,rows in df.iloc[c:chunk_size+c].iterrows():
-
-            if(chunk_count==chunk_size):
-                break
-
-            inner_array.append({'trackingNumberInfo':{'trackingNumber': rows['TRACKINGID']}})
-            chunk_count+=1
-
-
-        if(len(inner_array)>0):
-            payload['trackingInfo']=inner_array
-            #['includeDetailedScans']=True
-
-            # call api here
-
-            resp=make_fedex_api_call(bearer_token, "/track/v1/trackingnumbers", payload)
-            #print(json.dumps(resp, indent=2))
-
-            outer_array.append(resp)
-
-        c=c+chunk_size
-
-    outer_array=append_identifier_to_response(outer_array, df)
+    logging.info("Azure Storage access token obtained successfully.")
     
-    return outer_array
-
-def append_identifier_to_response(outer_array, df):
-
-    id_map = {
-        str(row['TRACKINGID']): {
-            'identifierKey': row['identifier_key'],
-            'identifierValue': row['identifier_value']
-        }
-        for _, row in df.iterrows()
+    storage_options = {
+    "azure_storage_account_name": spares_storage_account_name,
+    "azure_storage_token": azure_storage_token.token,
     }
 
-    for resp in outer_array:
-        for result in resp.get('output', {}).get('completeTrackResults', []):
-            tracking_id = str(result.get('trackingNumber'))
-            if tracking_id in id_map:
-                result['identifierKey'] = id_map[tracking_id]['identifierKey']
-                result['identifierValue'] = id_map[tracking_id]['identifierValue']
-    return outer_array
+
+    try:
+        _ = DeltaTable(spares_storage_account_url, storage_options=storage_options)
+        table_exists = True
+        logging.info("Delta table exists, will append.")
+    except Exception as e:
+        table_exists = False
+        logging.info(f"Delta table does not exist or cannot access, will create new. Error: {e}")
+
+    write_deltalake(
+    spares_storage_account_url,
+    df,
+    mode="append" if table_exists else "overwrite",
+    storage_options=storage_options,
+    schema_mode='merge'
+    )
+
+    logging.info("Finished writing to delta lake...")
+
+    
