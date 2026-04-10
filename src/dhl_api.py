@@ -85,7 +85,7 @@ class DHLAPI(APIFactory):
                 time.sleep(30) # wait for retry delay
             
             if(has_exception == True):
-                outer_array.append({})  #append empty response- so it gets marked as error later on
+                outer_array.append({'trackingId': str(rows['TRACKINGID'])})  #append empty response- so it gets marked as error later on
 
         
         outer_array = self.append_identifier_to_response(outer_array, df)
