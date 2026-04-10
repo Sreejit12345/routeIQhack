@@ -120,7 +120,7 @@ class FEDEXAPI(APIFactory):
                         retry_count += 1
                         logging.error(f"API call failed for chunk starting at row {c} with error: {e}")
                     
-                    if not has_exception:
+                    if  has_exception == False:
                         break
 
             
@@ -240,5 +240,11 @@ class FEDEXAPI(APIFactory):
 
         # Add load timestamp to all rows
         combined_df['loadtimestamp'] = datetime.now().isoformat()
-
+        '''
+        pd.set_option('display.max_columns', None)
+        pd.set_option('display.max_rows', None)
+        pd.set_option('display.width', None)
+        pd.set_option('display.max_colwidth', None)
+        logging.info("dataframe is \n%s", combined_df)
+        '''
         return combined_df

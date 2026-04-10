@@ -66,7 +66,7 @@ class DHLAPI(APIFactory):
 
                 if(retry_count > 0):
                     logging.info(f"Retrying API call for tracking number {rows['TRACKINGID']}. Attempt {retry_count} of {retry_limit}.")
-                    time.sleep(10) # wait for retry delay
+                    time.sleep(30) # wait for retry delay
 
                 try:
                     has_exception = False
@@ -79,10 +79,10 @@ class DHLAPI(APIFactory):
                 
                 retry_count += 1
                 
-                if not has_exception:
+                if has_exception ==False:
                     break
 
-                time.sleep(10)
+                time.sleep(30) # wait for retry delay
             
             if(has_exception == True):
                 outer_array.append({})  #append empty response- so it gets marked as error later on
@@ -272,7 +272,13 @@ class DHLAPI(APIFactory):
         
         # Add load timestamp to all rows
         combined_df['loadtimestamp'] = datetime.now().isoformat()
-
+        '''
+        pd.set_option('display.max_columns', None)
+        pd.set_option('display.max_rows', None)
+        pd.set_option('display.width', None)
+        pd.set_option('display.max_colwidth', None)
+        logging.info("dataframe is \n%s", combined_df)
+        '''
         return combined_df
 
 '''
@@ -282,13 +288,8 @@ if(__name__ == "__main__"):
 
     api_response = dhl_api_obj.curate_api_response(
         pd.DataFrame([
-            {"TRACKINGID": "1212121212211211221", "NotificationId": "test-notif-1"},
-            {"TRACKINGID": "2596398243", "NotificationId": "test-notif-2"},
-            {"TRACKINGID": "6654255506", "NotificationId": "test-notif-3"},
-            {"TRACKINGID": "1102590775", "NotificationId": "test-notif-4"},
-            {"TRACKINGID": "1107884680", "NotificationId": "test-notif-5"},
-            {"TRACKINGID": "1107884691", "NotificationId": "test-notif-6"},
-            {"TRACKINGID": "1107884702", "NotificationId": "test-notif-7"}
+            {"TRACKINGID": "1102590775", "NotificationId": "test-notif-1"},
+            {"TRACKINGID": "sreejittest1234manikanta", "NotificationId": "test-notif-2"},
         ]))
 
     final_output = dhl_api_obj.generate_final_output(api_response)
