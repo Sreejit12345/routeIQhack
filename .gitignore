@@ -47,3 +47,4 @@ __blobstorage__
 __queuestorage__
 __azurite_db*__.json
 test.py
+dhl_test.py
